@@ -7,8 +7,7 @@
 // - Runtime queries use DATABASE_URL (pooler) via @prisma/adapter-pg
 
 generator client {
-  provider = "prisma-client"
-  output   = "../generated/prisma"
+  provider = "prisma-client-js"
 }
 
 datasource db {
