@@ -1,0 +1,163 @@
+// Glucofy / CareFull — Prisma Schema
+// Database: PostgreSQL (Supabase for dev, RDS for prod)
+//
+// IMPORTANT (Prisma v7):
+// - `directUrl` in datasource block is DEPRECATED.
+// - Migrations use DIRECT_URL configured in prisma.config.ts
+// - Runtime queries use DATABASE_URL (pooler) via @prisma/adapter-pg
+
+generator client {
+  provider = "prisma-client"
+  output   = "../generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ──────────────────────────────────────────────
+// ENUMS
+// ──────────────────────────────────────────────
+
+enum Role {
+  USER
+  PREMIUM
+  ADMIN
+}
+
+enum Gender {
+  MALE
+  FEMALE
+}
+
+enum NutriGrade {
+  A
+  B
+  C
+  D
+}
+
+enum EntryMethod {
+  SCAN
+  MANUAL
+}
+
+enum SubscriptionStatus {
+  ACTIVE
+  CANCELLED
+  EXPIRED
+}
+
+// ──────────────────────────────────────────────
+// USER & AUTH
+// ──────────────────────────────────────────────
+
+model User {
+  id            String    @id @default(cuid())
+  email         String    @unique
+  passwordHash  String    @map("password_hash")
+  name          String?
+  profileImage  String?   @map("profile_image")
+  role          Role      @default(USER)
+  createdAt     DateTime  @default(now()) @map("created_at")
+  updatedAt     DateTime  @updatedAt @map("updated_at")
+
+  // Relations
+  healthProfile   HealthProfile?
+  consumptionLogs ConsumptionLog[]
+  subscription    Subscription?
+  otpCodes        OtpVerification[]
+
+  @@map("users")
+}
+
+model HealthProfile {
+  id     String  @id @default(cuid())
+  userId String  @unique @map("user_id")
+  age    Int?
+  weight Float?
+  height Float?
+  gender Gender?
+  bmi    Float?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("health_profiles")
+}
+
+// ──────────────────────────────────────────────
+// NUTRITION & CONSUMPTION
+// ──────────────────────────────────────────────
+
+model ConsumptionLog {
+  id                   String      @id @default(cuid())
+  userId               String      @map("user_id")
+  productName          String      @map("product_name")
+  servingSizeMl        Float       @map("serving_size_ml")
+  sugarPer100ml        Float       @map("sugar_per_100ml")
+  saltPer100ml         Float       @map("salt_per_100ml")
+  saturatedFatPer100ml Float       @map("saturated_fat_per_100ml")
+  nutriGrade           NutriGrade  @map("nutri_grade")
+  scanImageKey         String?     @map("scan_image_s3_key")
+  entryMethod          EntryMethod @default(SCAN) @map("entry_method")
+  consumedAt           DateTime    @default(now()) @map("consumed_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, consumedAt(sort: Desc)], name: "idx_log_user_consumed")
+  @@index([userId, nutriGrade], name: "idx_log_user_grade")
+  @@index([consumedAt], name: "idx_log_consumed_at")
+
+  @@map("consumption_logs")
+}
+
+// ──────────────────────────────────────────────
+// NUTRI-LEVEL GRADING THRESHOLDS (Gov Reference)
+// ──────────────────────────────────────────────
+
+model NutriGradeThreshold {
+  id                      Int        @id @default(autoincrement())
+  grade                   NutriGrade @unique
+  maxSugarPer100ml        Float      @map("max_sugar_per_100ml")
+  maxSaltPer100ml         Float      @map("max_salt_per_100ml")
+  maxSaturatedFatPer100ml Float      @map("max_saturated_fat_per_100ml")
+
+  @@map("nutri_grade_thresholds")
+}
+
+// ──────────────────────────────────────────────
+// SUBSCRIPTION
+// ──────────────────────────────────────────────
+
+model Subscription {
+  id         String             @id @default(cuid())
+  userId     String             @unique @map("user_id")
+  status     SubscriptionStatus @default(ACTIVE)
+  validUntil DateTime           @map("valid_until")
+  createdAt  DateTime           @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, status], name: "idx_sub_user_status")
+
+  @@map("subscriptions")
+}
+
+// ──────────────────────────────────────────────
+// OTP VERIFICATION
+// ──────────────────────────────────────────────
+
+model OtpVerification {
+  id        String   @id @default(cuid())
+  userId    String   @map("user_id")
+  code      String
+  expiresAt DateTime @map("expires_at")
+  verified  Boolean  @default(false)
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, expiresAt(sort: Desc)], name: "idx_otp_user_expires")
+
+  @@map("otp_verifications")
+}
