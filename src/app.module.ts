@@ -6,21 +6,20 @@ import { PrismaModule } from './prisma/prisma.module';
 import { AuthModule } from './auth/auth.module';
 import { UsersModule } from './users/users.module';
 import { NutritionModule } from './nutrition/nutrition.module';
+import { SummarizeModule } from './summarize/summarize.module';
 
 @Module({
   imports: [
-    // Global config — loads .env automatically, available everywhere via ConfigService
     ConfigModule.forRoot({
       isGlobal: true,
     }),
 
-    // Core modules
     PrismaModule,
 
-    // Feature modules
     AuthModule,
     UsersModule,
     NutritionModule,
+    SummarizeModule,
   ],
   controllers: [AppController],
   providers: [AppService],

@@ -1,0 +1,302 @@
+{
+  "info": {
+    "name": "Glucofy API",
+    "description": "AI-powered sugar & nutrition intake tracking platform.\n\nBase URL: http://localhost:3000/api/v1\nSwagger: http://localhost:3000/docs\n\nWorkflow:\n1. Register or Login to get a JWT token\n2. Set the {{token}} variable (auto-set by Login)\n3. Update health profile for personalized limits\n4. Scan labels or log manually\n5. Check dashboard, charts, and patterns",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:3000/api/v1"
+    },
+    {
+      "key": "token",
+      "value": ""
+    }
+  ],
+  "item": [
+    {
+      "name": "Auth",
+      "item": [
+        {
+          "name": "Register",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/auth/register",
+              "host": ["{{baseUrl}}"],
+              "path": ["auth", "register"]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"kevin@gmail.com\",\n  \"password\": \"StrongPassword123\",\n  \"name\": \"Kevin\"\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 201) {",
+                  "  var json = pm.response.json();",
+                  "  pm.collectionVariables.set('token', json.accessToken);",
+                  "  console.log('Token saved from Register');",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        },
+        {
+          "name": "Login",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/auth/login",
+              "host": ["{{baseUrl}}"],
+              "path": ["auth", "login"]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"kevin@gmail.com\",\n  \"password\": \"StrongPassword123\"\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 200) {",
+                  "  var json = pm.response.json();",
+                  "  pm.collectionVariables.set('token', json.accessToken);",
+                  "  console.log('Token saved from Login');",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Users",
+      "item": [
+        {
+          "name": "Get My Profile",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/users/me",
+              "host": ["{{baseUrl}}"],
+              "path": ["users", "me"]
+            }
+          }
+        },
+        {
+          "name": "Update Health Profile",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{token}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/users/me/health-profile",
+              "host": ["{{baseUrl}}"],
+              "path": ["users", "me", "health-profile"]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"age\": 25,\n  \"weight\": 70,\n  \"height\": 175,\n  \"gender\": \"MALE\",\n  \"activityLevel\": \"MODERATE\"\n}"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Nutrition",
+      "item": [
+        {
+          "name": "Step 1: Get Scan Upload URL",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/nutrition/scan-upload-url?contentType=image/jpeg",
+              "host": ["{{baseUrl}}"],
+              "path": ["nutrition", "scan-upload-url"],
+              "query": [
+                { "key": "contentType", "value": "image/jpeg" }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 200) {",
+                  "  var json = pm.response.json();",
+                  "  pm.collectionVariables.set('uploadUrl', json.uploadUrl);",
+                  "  pm.collectionVariables.set('s3Key', json.s3Key);",
+                  "  console.log('Upload URL and s3Key saved');",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        },
+        {
+          "name": "Step 2: Upload Image to S3",
+          "request": {
+            "method": "PUT",
+            "header": [
+              { "key": "Content-Type", "value": "image/jpeg" }
+            ],
+            "url": {
+              "raw": "{{uploadUrl}}",
+              "host": ["{{uploadUrl}}"]
+            },
+            "body": {
+              "mode": "file",
+              "file": {
+                "src": ""
+              }
+            },
+            "description": "Upload the nutrition label image DIRECTLY to S3 using the pre-signed URL from Step 1.\n\nIn Postman: Select Body > binary > choose your image file."
+          }
+        },
+        {
+          "name": "Step 3: Process Scan (OCR + Grade)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{token}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/nutrition/scan",
+              "host": ["{{baseUrl}}"],
+              "path": ["nutrition", "scan"]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"s3Key\": \"{{s3Key}}\",\n  \"productName\": \"Pocari Sweat\",\n  \"servingSizeMl\": 250\n}"
+            }
+          }
+        },
+        {
+          "name": "Manual Entry",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{token}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/nutrition/manual",
+              "host": ["{{baseUrl}}"],
+              "path": ["nutrition", "manual"]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"productName\": \"Teh Botol Sosro\",\n  \"servingSizeMl\": 250,\n  \"sugarPer100ml\": 12,\n  \"saltPer100ml\": 0.1,\n  \"saturatedFatPer100ml\": 0.3\n}"
+            }
+          }
+        },
+        {
+          "name": "Last 10 Consumption Logs",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/nutrition/last-consumption",
+              "host": ["{{baseUrl}}"],
+              "path": ["nutrition", "last-consumption"]
+            }
+          }
+        },
+        {
+          "name": "Dashboard Summary (Streak + Limit)",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/nutrition/dashboard-summary",
+              "host": ["{{baseUrl}}"],
+              "path": ["nutrition", "dashboard-summary"]
+            }
+          }
+        },
+        {
+          "name": "Weekly Chart",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/nutrition/charts/weekly",
+              "host": ["{{baseUrl}}"],
+              "path": ["nutrition", "charts", "weekly"]
+            }
+          }
+        },
+        {
+          "name": "Daily Pattern",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/nutrition/daily-pattern?date=2024-01-15",
+              "host": ["{{baseUrl}}"],
+              "path": ["nutrition", "daily-pattern"],
+              "query": [
+                { "key": "date", "value": "2024-01-15", "description": "Optional: YYYY-MM-DD, defaults to today" }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Summarize",
+      "item": [
+        {
+          "name": "AI Recommendations (Premium)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/summarize",
+              "host": ["{{baseUrl}}"],
+              "path": ["summarize"]
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -29,6 +29,13 @@ enum Gender {
   FEMALE
 }
 
+enum ActivityLevel {
+  SEDENTARY
+  LIGHT
+  MODERATE
+  ACTIVE
+}
+
 enum NutriGrade {
   A
   B
@@ -78,6 +85,7 @@ model HealthProfile {
   height Float?
   gender Gender?
   bmi    Float?
+  activityLevel ActivityLevel? @map("activity_level")
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
