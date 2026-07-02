@@ -4,6 +4,8 @@
 >
 > **Swagger UI:** `http://localhost:3000/docs`
 >
+> **OCR Engine:** Google Gemini Vision (Gemini 2.0 Flash) — requires `GEMINI_API_KEY` in `.env`
+>
 > **Authentication:** JWT Bearer token via `Authorization: Bearer <token>`
 
 ---
@@ -214,7 +216,7 @@ Body: <raw image binary>
 
 ### POST `/nutrition/scan`
 
-**Step 2 of scanning.** After the image is uploaded to S3, call this endpoint with the `s3Key`. The backend runs AWS Textract OCR on the S3 object, extracts sugar and serving size, calculates NutriGrade, and saves a consumption log.
+**Step 2 of scanning.** After the image is uploaded to S3, call this endpoint with the `s3Key`. The backend downloads the image from S3 and sends it to **Google Gemini Vision** for OCR extraction. It extracts sugar and serving size, calculates NutriGrade, and saves a consumption log.
 
 **Request Body:**
 
@@ -489,4 +491,4 @@ The daily limit is personalized using the **Mifflin-St Jeor BMR** equation:
 3. Frontend  →  POST /nutrition/scan { s3Key }     →  OCR + Grade + Save
 ```
 
-The backend never handles the image binary. Textract reads directly from S3.
+The backend never handles the image binary in the API handler. Gemini reads the image from S3 after the backend downloads it.

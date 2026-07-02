@@ -17,6 +17,8 @@ provider:
     JWT_EXPIRES_IN: ${env:JWT_EXPIRES_IN, '7d'}
     AWS_S3_BUCKET: ${env:AWS_S3_BUCKET, 'glucofy-scans'}
     AWS_S3_REGION: ${env:AWS_S3_REGION, 'ap-southeast-1'}
+    GEMINI_API_KEY: ${env:GEMINI_API_KEY}
+    GEMINI_OCR_MODEL: ${env:GEMINI_OCR_MODEL, 'gemini-2.0-flash'}
 
 functions:
   api:
