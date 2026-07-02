@@ -14,6 +14,7 @@ export default defineConfig({
   schema: "prisma/schema.prisma",
   migrations: {
     path: "prisma/migrations",
+    seed: "npx ts-node prisma/seed.ts",
   },
   // Prisma CLI (migrate, studio, introspect) uses DIRECT connection
   // This bypasses the connection pooler (PgBouncer) which doesn't support

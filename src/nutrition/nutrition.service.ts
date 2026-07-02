@@ -1,43 +1,64 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, BadRequestException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
+import { S3Service } from './services/s3.service';
+import { TextractService } from './services/textract.service';
 import { CreateNutritionManualDto } from './dto/create-nutrition-manual.dto';
 import {
   NutritionResponseDto,
   LastConsumptionResponseDto,
 } from './dto/nutrition-response.dto';
+import {
+  DashboardSummaryDto,
+  WeeklyChartResponseDto,
+  DailyPatternResponseDto,
+  ScanResultDto,
+} from './dto/dashboard.dto';
+import { ScanUploadUrlResponseDto } from './dto/scan-upload-url.dto';
+import { calculateDailySugarLimit } from '../common/utils/sugar-limit.util';
 
 @Injectable()
 export class NutritionService {
   private readonly logger = new Logger(NutritionService.name);
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly s3Service: S3Service,
+    private readonly textractService: TextractService,
+  ) {}
+
+  // ─────────────────────────────────────────────────────────────
+  // DYNAMIC DAILY LIMIT
+  // ─────────────────────────────────────────────────────────────
 
   /**
-   * Create a manual nutrition log entry.
-   *
-   * NutriGrade Calculation:
-   * 1. Load grade thresholds from DB (NutriGradeThreshold table)
-   * 2. Check which grade the product falls into (A → D)
-   * 3. A product gets the worst grade where ANY of its values exceed the threshold
-   * 4. Fallback to D if all thresholds exceeded
+   * Resolve the user's personalized daily added-sugar limit (grams).
+   * Falls back to 50g/day when the health profile is incomplete.
    */
+  private async getDailyLimit(userId: string): Promise<number> {
+    const profile = await this.prisma.healthProfile.findUnique({
+      where: { userId },
+    });
+    return calculateDailySugarLimit(profile);
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // MANUAL ENTRY
+  // ─────────────────────────────────────────────────────────────
+
   async createManual(
     userId: string,
     dto: CreateNutritionManualDto,
   ): Promise<NutritionResponseDto> {
-    // 1. Load thresholds from DB (sorted A → D)
     const thresholds = await this.prisma.nutriGradeThreshold.findMany({
-      orderBy: { grade: 'asc' }, // A, B, C, D
+      orderBy: { grade: 'asc' },
     });
 
-    // 2. Calculate NutriGrade
     const nutriGrade = this.calculateNutriGrade(dto, thresholds);
 
     this.logger.log(
       `NutriGrade calculated for "${dto.productName}": ${nutriGrade}`,
     );
 
-    // 3. Save to DB
     const log = await this.prisma.consumptionLog.create({
       data: {
         userId,
@@ -54,11 +75,93 @@ export class NutritionService {
     return this.mapToResponseDto(log);
   }
 
+  // ─────────────────────────────────────────────────────────────
+  // SCANNING (Pre-signed URL + S3-triggered Textract)
+  // ─────────────────────────────────────────────────────────────
+
   /**
-   * Get the last 10 consumption logs for the authenticated user.
-   * Ordered by consumedAt DESC (most recent first).
+   * Step 1 of scanning: hand the frontend a pre-signed URL so it can upload
+   * the label image DIRECTLY to S3 (no image payload through the backend).
    */
-  async findLastConsumption(userId: string): Promise<LastConsumptionResponseDto> {
+  async getUploadUrl(contentType: string): Promise<ScanUploadUrlResponseDto> {
+    return this.s3Service.generateUploadUrl(contentType);
+  }
+
+  /**
+   * Step 2 of scanning: the image is already in S3. Run Textract on it,
+   * derive per-100ml sugar concentration, grade it, and log the consumption.
+   *
+   * Volume policy (see PRD): we assume the user consumed ONE serving
+   * (takaran saji). The label's sugar value is per-serving, so we normalize
+   * to per-100ml for grading and store the serving size as the consumed volume.
+   */
+  async scanAndCreate(
+    userId: string,
+    s3Key: string,
+    productName?: string,
+    servingSizeOverrideMl?: number,
+  ): Promise<ScanResultDto> {
+    const extracted = await this.textractService.extractNutritionFromS3(
+      this.s3Service.bucket,
+      s3Key,
+    );
+
+    // Sugar is mandatory — without it there is nothing to grade or track.
+    if (extracted.sugarPerServing === null) {
+      throw new BadRequestException(
+        'Gagal mengekstrak kadar gula dari gambar. Silakan foto ulang lebih jelas atau gunakan input manual.',
+      );
+    }
+
+    // Serving size resolution: user override wins; else OCR; else reject so we
+    // never silently assume a wrong volume and corrupt the streak.
+    const servingSizeMl = servingSizeOverrideMl ?? extracted.servingSizeMl;
+    if (servingSizeMl == null || servingSizeMl <= 0) {
+      throw new BadRequestException(
+        'Takaran saji (mL) tidak terdeteksi dari gambar. Silakan masukkan volume secara manual pada field servingSizeMl.',
+      );
+    }
+
+    // Normalize label per-serving values → per-100ml.
+    const factor = 100 / servingSizeMl;
+    const sugarPer100ml =
+      Math.round(extracted.sugarPerServing * factor * 100) / 100;
+    const saltPer100ml =
+      Math.round((extracted.saltPerServing ?? 0) * factor * 100) / 100;
+    const saturatedFatPer100ml =
+      Math.round((extracted.saturatedFatPerServing ?? 0) * factor * 100) / 100;
+
+    const thresholds = await this.prisma.nutriGradeThreshold.findMany({
+      orderBy: { grade: 'asc' },
+    });
+
+    const nutriGrade = this.calculateNutriGrade({ sugarPer100ml }, thresholds);
+
+    const log = await this.prisma.consumptionLog.create({
+      data: {
+        userId,
+        productName: productName ?? 'Scanned Product',
+        servingSizeMl,
+        sugarPer100ml,
+        saltPer100ml,
+        saturatedFatPer100ml,
+        nutriGrade,
+        scanImageKey: s3Key,
+        entryMethod: 'SCAN',
+      },
+    });
+
+    const scanImageUrl = await this.s3Service.getSignedUrl(s3Key);
+
+    return {
+      ...this.mapToResponseDto(log),
+      scanImageUrl,
+    };
+  }
+
+  async findLastConsumption(
+    userId: string,
+  ): Promise<LastConsumptionResponseDto> {
     const logs = await this.prisma.consumptionLog.findMany({
       where: { userId },
       orderBy: { consumedAt: 'desc' },
@@ -71,74 +174,346 @@ export class NutritionService {
     };
   }
 
+  // ─────────────────────────────────────────────────────────────
+  // DASHBOARD + STREAK
+  // ─────────────────────────────────────────────────────────────
+
+  async getDashboardSummary(userId: string): Promise<DashboardSummaryDto> {
+    const dailyLimit = await this.getDailyLimit(userId);
+
+    const now = new Date();
+    const todayStart = new Date(
+      now.getFullYear(),
+      now.getMonth(),
+      now.getDate(),
+    );
+    const todayEnd = new Date(
+      now.getFullYear(),
+      now.getMonth(),
+      now.getDate() + 1,
+    );
+
+    const todayLogs = await this.prisma.consumptionLog.findMany({
+      where: {
+        userId,
+        consumedAt: { gte: todayStart, lt: todayEnd },
+      },
+    });
+
+    const consumedToday = todayLogs.reduce((sum, log) => {
+      return sum + (log.sugarPer100ml * log.servingSizeMl) / 100;
+    }, 0);
+
+    const consumedTodayRounded = Math.round(consumedToday * 10) / 10;
+    const limitExceeded = consumedTodayRounded > dailyLimit;
+
+    const { currentStreak, longestStreak } = await this.calculateStreak(
+      userId,
+      todayStart,
+      todayLogs.length > 0,
+      limitExceeded,
+      dailyLimit,
+    );
+
+    const lastLog = await this.prisma.consumptionLog.findFirst({
+      where: { userId },
+      orderBy: { consumedAt: 'desc' },
+      select: { consumedAt: true },
+    });
+
+    return {
+      consumedToday: consumedTodayRounded,
+      dailyLimit,
+      limitExceeded,
+      currentStreak,
+      longestStreak,
+      lastConsumptionAt: lastLog?.consumedAt ?? null,
+    };
+  }
+
+  async getWeeklyChart(userId: string): Promise<WeeklyChartResponseDto> {
+    const dailyLimit = await this.getDailyLimit(userId);
+
+    const now = new Date();
+    const sevenDaysAgo = new Date(
+      now.getFullYear(),
+      now.getMonth(),
+      now.getDate() - 6,
+    );
+
+    const logs = await this.prisma.consumptionLog.findMany({
+      where: {
+        userId,
+        consumedAt: { gte: sevenDaysAgo },
+      },
+      orderBy: { consumedAt: 'asc' },
+    });
+
+    const dailyMap = new Map<
+      string,
+      { totalSugar: number; logCount: number }
+    >();
+
+    for (let i = 0; i < 7; i++) {
+      const d = new Date(
+        now.getFullYear(),
+        now.getMonth(),
+        now.getDate() - 6 + i,
+      );
+      const key = d.toISOString().split('T')[0];
+      dailyMap.set(key, { totalSugar: 0, logCount: 0 });
+    }
+
+    for (const log of logs) {
+      const key = log.consumedAt.toISOString().split('T')[0];
+      const entry = dailyMap.get(key);
+      if (entry) {
+        entry.totalSugar += (log.sugarPer100ml * log.servingSizeMl) / 100;
+        entry.logCount++;
+      }
+    }
+
+    const data = Array.from(dailyMap.entries()).map(([date, entry]) => ({
+      date,
+      totalSugar: Math.round(entry.totalSugar * 10) / 10,
+      logCount: entry.logCount,
+      exceeded: entry.totalSugar > dailyLimit,
+    }));
+
+    return { data, dailyLimit };
+  }
+
+  async getDailyPattern(
+    userId: string,
+    date?: string,
+  ): Promise<DailyPatternResponseDto> {
+    const targetDate = date ? new Date(date) : new Date();
+    const dayStart = new Date(
+      targetDate.getFullYear(),
+      targetDate.getMonth(),
+      targetDate.getDate(),
+    );
+    const dayEnd = new Date(
+      targetDate.getFullYear(),
+      targetDate.getMonth(),
+      targetDate.getDate() + 1,
+    );
+
+    const logs = await this.prisma.consumptionLog.findMany({
+      where: {
+        userId,
+        consumedAt: { gte: dayStart, lt: dayEnd },
+      },
+    });
+
+    const periods = {
+      morning: { totalSugar: 0, logCount: 0, timeRange: '06:00 - 12:00' },
+      afternoon: { totalSugar: 0, logCount: 0, timeRange: '12:00 - 18:00' },
+      night: { totalSugar: 0, logCount: 0, timeRange: '18:00 - 06:00' },
+    };
+
+    for (const log of logs) {
+      const hour = log.consumedAt.getHours();
+      const sugarAmount = (log.sugarPer100ml * log.servingSizeMl) / 100;
+
+      if (hour >= 6 && hour < 12) {
+        periods.morning.totalSugar += sugarAmount;
+        periods.morning.logCount++;
+      } else if (hour >= 12 && hour < 18) {
+        periods.afternoon.totalSugar += sugarAmount;
+        periods.afternoon.logCount++;
+      } else {
+        periods.night.totalSugar += sugarAmount;
+        periods.night.logCount++;
+      }
+    }
+
+    const totalSugar =
+      periods.morning.totalSugar +
+      periods.afternoon.totalSugar +
+      periods.night.totalSugar;
+
+    const data = Object.entries(periods).map(([period, info]) => ({
+      period,
+      timeRange: info.timeRange,
+      totalSugar: Math.round(info.totalSugar * 10) / 10,
+      logCount: info.logCount,
+      percentage:
+        totalSugar > 0
+          ? Math.round((info.totalSugar / totalSugar) * 1000) / 10
+          : 0,
+    }));
+
+    return {
+      data,
+      date: dayStart.toISOString().split('T')[0],
+    };
+  }
+
   /**
-   * Calculate NutriGrade based on nutritional values and thresholds.
+   * Current streak: consecutive days (ending today/yesterday) where total
+   * sugar stayed at or below the personalized daily limit.
    *
-   * Rules (following Singapore Nutri-Grade system):
-   * - Grade is determined by the WORST performing nutrient
-   * - We iterate from best grade (A) to worst (D)
-   * - First grade where ALL thresholds are satisfied = the product's grade
-   * - If no grade matches, fall back to 'D'
+   * Rules (see PRD):
+   * - Today counts as +1 only once the user has logged and is still <= limit.
+   * - If today has no logs yet, we do NOT break — we show the streak through
+   *   yesterday (the empty day only breaks it once midnight passes).
+   * - Any past day with logs > limit breaks the streak.
+   * - Any past day with zero logs (a gap in the date sequence) breaks it.
    */
+  private async calculateStreak(
+    userId: string,
+    todayStart: Date,
+    hasLogsToday: boolean,
+    limitExceededToday: boolean,
+    dailyLimit: number,
+  ): Promise<{ currentStreak: number; longestStreak: number }> {
+    const longestStreak = await this.computeLongestStreak(userId, dailyLimit);
+
+    if (hasLogsToday && limitExceededToday) {
+      return { currentStreak: 0, longestStreak };
+    }
+
+    const pastLogs = await this.prisma.consumptionLog.findMany({
+      where: {
+        userId,
+        consumedAt: { lt: todayStart },
+      },
+      orderBy: { consumedAt: 'desc' },
+    });
+
+    const dailyTotals = new Map<string, number>();
+    for (const log of pastLogs) {
+      const key = log.consumedAt.toISOString().split('T')[0];
+      const current = dailyTotals.get(key) ?? 0;
+      dailyTotals.set(
+        key,
+        current + (log.sugarPer100ml * log.servingSizeMl) / 100,
+      );
+    }
+
+    let currentStreak = 0;
+    const checkDate = new Date(todayStart);
+
+    if (hasLogsToday && !limitExceededToday) {
+      currentStreak = 1;
+    }
+
+    checkDate.setDate(checkDate.getDate() - 1);
+
+    while (true) {
+      const key = checkDate.toISOString().split('T')[0];
+      const dayTotal = dailyTotals.get(key);
+
+      if (dayTotal === undefined) {
+        break; // empty day → streak broken
+      }
+
+      if (dayTotal > dailyLimit) {
+        break; // over limit → streak broken
+      }
+
+      currentStreak++;
+      checkDate.setDate(checkDate.getDate() - 1);
+    }
+
+    return {
+      currentStreak,
+      longestStreak: Math.max(longestStreak, currentStreak),
+    };
+  }
+
+  private async computeLongestStreak(
+    userId: string,
+    dailyLimit: number,
+  ): Promise<number> {
+    const allLogs = await this.prisma.consumptionLog.findMany({
+      where: { userId },
+      orderBy: { consumedAt: 'asc' },
+    });
+
+    if (!allLogs.length) return 0;
+
+    const dailyTotals = new Map<string, number>();
+    for (const log of allLogs) {
+      const key = log.consumedAt.toISOString().split('T')[0];
+      const current = dailyTotals.get(key) ?? 0;
+      dailyTotals.set(
+        key,
+        current + (log.sugarPer100ml * log.servingSizeMl) / 100,
+      );
+    }
+
+    const sortedDates = Array.from(dailyTotals.keys()).sort();
+
+    let longest = 0;
+    let current = 0;
+
+    for (let i = 0; i < sortedDates.length; i++) {
+      const dateStr = sortedDates[i];
+      const total = dailyTotals.get(dateStr) ?? 0;
+
+      if (total > dailyLimit) {
+        current = 0;
+        continue;
+      }
+
+      if (i === 0) {
+        current = 1;
+      } else {
+        const prevDate = new Date(sortedDates[i - 1]);
+        const currDate = new Date(dateStr);
+        const diffDays =
+          (currDate.getTime() - prevDate.getTime()) / (1000 * 60 * 60 * 24);
+
+        if (diffDays === 1) {
+          current++;
+        } else {
+          current = 1;
+        }
+      }
+
+      longest = Math.max(longest, current);
+    }
+
+    return longest;
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // NUTRIGRADE (sugar-only)
+  // ─────────────────────────────────────────────────────────────
+
   private calculateNutriGrade(
-    dto: Pick<
-      CreateNutritionManualDto,
-      'sugarPer100ml' | 'saltPer100ml' | 'saturatedFatPer100ml'
-    >,
+    dto: Pick<CreateNutritionManualDto, 'sugarPer100ml'>,
     thresholds: Array<{
       grade: string;
       maxSugarPer100ml: number;
-      maxSaltPer100ml: number;
-      maxSaturatedFatPer100ml: number;
     }>,
   ): 'A' | 'B' | 'C' | 'D' {
-    // If no thresholds in DB (e.g. seed not run), use hardcoded fallback
     if (!thresholds.length) {
       return this.fallbackNutriGrade(dto);
     }
 
     for (const threshold of thresholds) {
-      const fitsGrade =
-        dto.sugarPer100ml <= threshold.maxSugarPer100ml &&
-        dto.saltPer100ml <= threshold.maxSaltPer100ml &&
-        dto.saturatedFatPer100ml <= threshold.maxSaturatedFatPer100ml;
-
-      if (fitsGrade) {
+      if (dto.sugarPer100ml <= threshold.maxSugarPer100ml) {
         return threshold.grade as 'A' | 'B' | 'C' | 'D';
       }
     }
 
-    // Exceeds all thresholds → D
     return 'D';
   }
 
-  /**
-   * Fallback NutriGrade calculation using hardcoded values.
-   * Used when NutriGradeThreshold table is empty.
-   *
-   * Based on Singapore Nutri-Grade thresholds (per 100ml):
-   * A: sugar ≤5g,  salt ≤0.3g,  fat ≤1.1g
-   * B: sugar ≤8g,  salt ≤0.6g,  fat ≤2.8g
-   * C: sugar ≤11.5g, salt ≤1.0g, fat ≤4.7g
-   * D: above C
-   */
   private fallbackNutriGrade(
-    dto: Pick<
-      CreateNutritionManualDto,
-      'sugarPer100ml' | 'saltPer100ml' | 'saturatedFatPer100ml'
-    >,
+    dto: Pick<CreateNutritionManualDto, 'sugarPer100ml'>,
   ): 'A' | 'B' | 'C' | 'D' {
-    const { sugarPer100ml: s, saltPer100ml: sa, saturatedFatPer100ml: f } = dto;
+    const s = dto.sugarPer100ml;
 
-    if (s <= 5 && sa <= 0.3 && f <= 1.1) return 'A';
-    if (s <= 8 && sa <= 0.6 && f <= 2.8) return 'B';
-    if (s <= 11.5 && sa <= 1.0 && f <= 4.7) return 'C';
+    if (s <= 1.0) return 'A';
+    if (s <= 5.0) return 'B';
+    if (s <= 8.0) return 'C';
     return 'D';
   }
 
-  /**
-   * Map Prisma ConsumptionLog record to NutritionResponseDto.
-   */
   private mapToResponseDto(log: {
     id: string;
     productName: string;
