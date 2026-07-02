@@ -4,20 +4,10 @@ import { ExtractJwt, Strategy } from 'passport-jwt';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../../prisma/prisma.service';
 
-/**
- * JWT Payload shape — apa yang di-encode ke dalam token
- */
 export interface JwtPayload {
   sub: string; // userId (cuid)
   email: string;
 }
-
-/**
- * JwtStrategy validates the JWT token on every protected request.
- * - Extracts Bearer token from Authorization header
- * - Verifies signature against JWT_SECRET
- * - Returns user object to be injected as @User() in controllers
- */
 @Injectable()
 export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
   constructor(
@@ -32,10 +22,6 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
     });
   }
 
-  /**
-   * Called automatically by Passport after signature verification.
-   * Return value is attached to request.user
-   */
   async validate(payload: JwtPayload) {
     const user = await this.prisma.user.findUnique({
       where: { id: payload.sub },
